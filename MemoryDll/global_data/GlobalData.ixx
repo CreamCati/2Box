@@ -52,12 +52,14 @@ namespace global
 		}
 
 	public:
-		void initialize(SystemVersionInfo versionInfo, std::uint64_t envFlag, unsigned long envIndex, std::wstring_view rootPath);
+		void initialize(SystemVersionInfo versionInfo, std::uint64_t envFlag, unsigned long envIndex,
+		                ULONGLONG cpuAffinityMask, std::wstring_view rootPath);
 
 	public:
 		SystemVersionInfo sysVersion() const { return m_sysVersion; }
 		std::uint64_t envFlag() const { return m_envFlag; }
 		std::uint32_t envIndex() const { return m_envIndex; }
+		ULONGLONG cpuAffinityMask() const { return m_cpuAffinityMask; }
 		bool isNonLimitedAdmin() const { return m_bIsNonLimitedAdmin; }
 		bool isCmd() const { return m_bIsCmd; }
 		std::wstring_view envFlagName() const { return m_envFlagName; }
@@ -84,6 +86,7 @@ namespace global
 		SystemVersionInfo m_sysVersion;
 		std::uint64_t m_envFlag{0};
 		std::uint32_t m_envIndex{0};
+		ULONGLONG m_cpuAffinityMask{0};
 		bool m_bIsNonLimitedAdmin{false};
 		bool m_bIsCmd{false};
 		std::wstring m_envFlagName;

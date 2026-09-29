@@ -11,6 +11,8 @@ namespace biz
 		EnvManager();
 		void loadEnvFrom(std::uint32_t index, std::uint64_t flag, std::wstring_view flagName, std::wstring_view name);
 		std::shared_ptr<Env> createEnv();
+		ULONGLONG getCpuAffinityMask(const std::shared_ptr<Env>& env) const;
+		void rebalanceCpuAffinity();
 		std::shared_ptr<Env> findEnvByFlagNoExcept(std::uint64_t flag) const;
 		std::shared_ptr<Env> findEnvByFlag(std::uint64_t flag) const;
 		std::size_t getEnvCount() const;
