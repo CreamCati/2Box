@@ -17,22 +17,25 @@ namespace
 {
 	ULONGLONG make_cpu_affinity_mask(std::size_t rank, std::size_t envCount)
 	{
+		// Normal Windows desktop case: processor group 0 contains all logical CPUs.
 		const DWORD processorCount = GetActiveProcessorCount(0);
 		if (processorCount == 0 || envCount == 0)
 		{
 			return 0;
 		}
 
-		// This implementation intentionally targets the normal single processor-group
-		// desktop case. Do not silently pretend to support >64 logical processors.
 		const std::size_t cpuCount = std::min<std::size_t>(processorCount, sizeof(ULONGLONG) * 8);
+
+		// More environments than CPUs: share CPUs round-robin.
 		if (envCount > cpuCount)
 		{
 			return ULONGLONG{1} << (rank % cpuCount);
 		}
 
+		// Evenly partition all available logical CPUs between active environments.
 		const std::size_t begin = (rank * cpuCount) / envCount;
 		const std::size_t end = ((rank + 1) * cpuCount) / envCount;
+
 		ULONGLONG mask = 0;
 		for (std::size_t cpu = begin; cpu < end; ++cpu)
 		{
@@ -122,19 +125,39 @@ namespace biz
 		envResult = std::make_shared<Env>(index, flag, flagName, name);
 		add_env_to_reg(flagName, envResult.get());
 		addEnv(envResult);
+		rebalanceCpuAffinity();
 		return envResult;
+	}
+
+	ULONGLONG EnvManager::getCpuAffinityMask(const std::shared_ptr<Env>& env) const
+	{
+		if (!env)
+		{
+			return 0;
+		}
+
+		auto allEnv = getAllEnv();
+		std::sort(allEnv.begin(), allEnv.end(), [](const auto& lhs, const auto& rhs)
+		{
+			return lhs->getIndex() < rhs->getIndex();
+		});
+
+		const auto it = std::find_if(allEnv.begin(), allEnv.end(), [&](const auto& item)
+		{
+			return item->getFlag() == env->getFlag();
+		});
+		if (it == allEnv.end())
+		{
+			return 0;
+		}
+
+		const std::size_t rank = static_cast<std::size_t>(std::distance(allEnv.begin(), it));
+		return make_cpu_affinity_mask(rank, allEnv.size());
 	}
 
 	void EnvManager::rebalanceCpuAffinity()
 	{
-		// Only environments that actually contain a running process participate.
-		// Empty/persisted environments must not consume a CPU slot.
 		auto allEnv = getAllEnv();
-		allEnv.erase(std::remove_if(allEnv.begin(), allEnv.end(), [](const auto& env)
-		{
-			return env->getAllProcessesCount() == 0;
-		}), allEnv.end());
-
 		std::sort(allEnv.begin(), allEnv.end(), [](const auto& lhs, const auto& rhs)
 		{
 			return lhs->getIndex() < rhs->getIndex();
@@ -150,11 +173,8 @@ namespace biz
 
 			for (const auto& process : allEnv[rank]->getAllProcesses())
 			{
-				if (!SetProcessAffinityMask(process->getHandle(), static_cast<KAFFINITY>(mask)))
-				{
-					// The process can exit between enumeration and this call.
-					// Affinity is an optimization and must never break the process.
-				}
+				// The process may terminate concurrently; failure is intentionally ignored.
+				SetProcessAffinityMask(process->getHandle(), static_cast<KAFFINITY>(mask));
 			}
 		}
 	}
@@ -190,6 +210,9 @@ namespace biz
 	void EnvManager::deleteEnv(std::shared_ptr<Env> env)
 	{
 		env->deleteDllFromDevice();
+		// Important: do not rebalance CPU affinity when an environment is deleted.
+		// Existing instances keep their original CPU range until they exit.
+		// This avoids touching many running processes during shutdown.
 		removeEnv(env->getFlag());
 		delete_env_dir(env->getIndex(), env->getFlagName());
 		delete_env_from_reg(env->getFlagName());

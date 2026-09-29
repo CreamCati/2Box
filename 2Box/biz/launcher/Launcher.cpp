@@ -13,7 +13,8 @@ import Biz.Core;
 
 namespace
 {
-	PROCESS_INFORMATION create_and_inject(const biz::Env* env, std::wstring_view exePath, std::wstring_view params)
+	PROCESS_INFORMATION create_and_inject(const biz::Env* env, ULONGLONG cpuAffinityMask,
+                                      std::wstring_view exePath, std::wstring_view params)
 	{
 		PROCESS_INFORMATION procInfo = {nullptr};
 		STARTUPINFOW startupInfo = {sizeof(startupInfo)};
@@ -41,6 +42,7 @@ namespace
 			injectParams->version = biz::get_core_data().version;
 			injectParams->envFlag = env->getFlag();
 			injectParams->envIndex = env->getIndex();
+			injectParams->cpuAffinityMask = cpuAffinityMask;
 			injectParams->rootPathCount = rootPathCount;
 			memcpy(injectParams->rootPath, rootPath.data(), rootPathSize);
 			if (!DetourCopyPayloadToProcess(procInfo.hProcess, DETOUR_INJECT_PARAMS_GUID, injectParams, paramsSize))
@@ -104,7 +106,17 @@ namespace biz
 		{
 			env = env_mgr().createEnv();
 		}
-		const PROCESS_INFORMATION procInfo = create_and_inject(env.get(), exePath, params);
+		const ULONGLONG cpuAffinityMask = env_mgr().getCpuAffinityMask(env);
+		const PROCESS_INFORMATION procInfo = create_and_inject(env.get(), cpuAffinityMask, exePath, params);
+
+		// Set affinity exactly once, while the root process is still suspended.
+		// Child processes inherit this affinity automatically, so the MemoryDll
+		// does not need to call SetProcessAffinityMask for every CreateProcess.
+		if (cpuAffinityMask)
+		{
+			SetProcessAffinityMask(procInfo.hProcess, static_cast<KAFFINITY>(cpuAffinityMask));
+		}
+
 		ResumeThread(procInfo.hThread);
 		CloseHandle(procInfo.hThread);
 		CloseHandle(procInfo.hProcess);

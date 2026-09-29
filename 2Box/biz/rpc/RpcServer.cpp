@@ -55,17 +55,10 @@ unsigned long long login(handle_t /*IDL_handle*/, unsigned int pid, unsigned lon
 	try
 	{
 		std::shared_ptr<biz::Env> pEnv = biz::env_mgr().findEnvByFlag(envFlag);
-		const bool wasEmpty = pEnv->getAllProcessesCount() == 0;
 		std::shared_ptr<biz::ProcessInfo> proc = pEnv->addProcess(pid);
 		if (!proc)
 		{
 			throw std::runtime_error{"add fail, already added before?"};
-		}
-		if (wasEmpty)
-		{
-			// Rebalance only when an environment becomes active. Child processes
-			// inherit their parent's affinity, so they do not need a CreateProcess hook.
-			biz::env_mgr().rebalanceCpuAffinity();
 		}
 		HANDLE boxHandleInRemote{nullptr};
 		if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(),

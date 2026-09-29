@@ -44,9 +44,10 @@ void request_window_inspection()
 	}
 }
 
-void initialize_global_data(SystemVersionInfo versionInfo, unsigned long long envFlag, unsigned long envIndex, std::wstring_view rootPath)
+void initialize_global_data(SystemVersionInfo versionInfo, unsigned long long envFlag, unsigned long envIndex,
+                            unsigned long long cpuAffinityMask, std::wstring_view rootPath)
 {
-	global::Data::get().initialize(versionInfo, envFlag, envIndex, rootPath);
+	global::Data::get().initialize(versionInfo, envFlag, envIndex, cpuAffinityMask, rootPath);
 }
 
 // 目前虽然处理了2box临时退出的情况, 但是当进程重新登录2box后必定会存在一段时间无法阻止其访问其他env内的窗口（因为其他env内的进程也可能正在登录），这可能会引起问题
@@ -146,11 +147,12 @@ void initialize_hook()
 	hook::hook_all();
 }
 
-void biz_initialize(SystemVersionInfo versionInfo, unsigned long long envFlag, unsigned long envIndex, const wchar_t* rootPath, DWORD rootPathCount)
+void biz_initialize(SystemVersionInfo versionInfo, unsigned long long envFlag, unsigned long envIndex,
+                     unsigned long long cpuAffinityMask, const wchar_t* rootPath, DWORD rootPathCount)
 {
 	try
 	{
-		initialize_global_data(versionInfo, envFlag, envIndex, std::wstring_view{rootPath, rootPathCount});
+		initialize_global_data(versionInfo, envFlag, envIndex, cpuAffinityMask, std::wstring_view{rootPath, rootPathCount});
 		initialize_rpc();
 		initialize_hook();
 	}

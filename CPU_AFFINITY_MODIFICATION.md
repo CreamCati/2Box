@@ -1,38 +1,66 @@
-# 2Box CPU 自动分配 V2
+# 2Box CPU 自动分配优化版
 
-## 为什么 V1 会导致卡死/单核 100%
+## 目标
 
-V1 在 MemoryDll 的 `CreateProcessA/W` Hook 中给每一个被创建的进程调用 `SetProcessAffinityMask`，同时 CPU 分区数量使用全部 Environment 数量。2Box 的 Environment 可以是历史/空环境，因此可能出现“实际只运行一个程序，但 CPU 被限制到一个逻辑核心”的情况。另一个风险是把目标程序创建的辅助子进程也强制限制到同一个 CPU 集合。
+CPU Affinity 只在必要时调整，避免关闭实例时遍历并修改大量正在运行的进程。
 
-## V2 设计
+假设处理器组 0 有 8 个逻辑处理器：
 
-CPU Affinity 不再通过 MemoryDll 的 CreateProcessW Hook 设置。目标进程完成 2Box RPC login 后，由 2Box 主进程统一给“正在运行的 Environment”均分逻辑 CPU。
+- 第 1 个实例：CPU 0-7
+- 第 2 个实例：CPU 0-3 / CPU 4-7
+- 第 3 个实例：CPU 0-2 / CPU 3-5 / CPU 6-7
+- 第 4 个实例：CPU 0-1 / CPU 2-3 / CPU 4-5 / CPU 6-7
+- 更多实例：当实例数超过逻辑处理器数量时，按逻辑处理器轮流共享。
 
-这样做有三个好处：
+## 调整策略
 
-1. 空的/历史 Environment 不占 CPU 配额。
-2. 不会把目标程序创建的所有子进程强制限制在同一个 CPU 集合；Windows 会让子进程继承父进程的 Affinity。
-3. Affinity 设置发生在目标程序正式 Resume 前的初始化阶段，减少启动过程中改变调度环境导致的兼容性风险。
+### 创建实例
 
-## 分配规则
+创建新实例时，根据当前实例总数重新计算分区。
 
-只统计 `getAllProcessesCount() > 0` 的 Environment。某个 Environment 第一次登录 2Box 时重新均分所有活跃 Environment。
+例如：
 
-例如 16 个逻辑 CPU、2 个活跃 Environment：
+1. 只有实例 1：`12345678`
+2. 创建实例 2：`1234 / 5678`
+3. 创建实例 3：`123 / 456 / 78`
 
-- Env 1 -> CPU 0-7
-- Env 2 -> CPU 8-15
+为了实现第 3 种情况，创建新实例时仍需要调整已经运行实例的进程 Affinity。
 
-如果当前只有一个活跃 Environment，它会获得全部 CPU，不会出现“单实例被限制到一个核心”的问题。
+### 删除实例
 
-## 当前限制
+删除实例时**不再重新分配 CPU**。
 
-当前实现仍针对单 Processor Group、最多 64 个逻辑 CPU。超过 64 逻辑 CPU 的机器后续应升级到 Processor Groups / CPU Sets。
+例如当前为：
 
-## 建议测试
+`123 / 456 / 78`
 
-1. 删除/关闭旧的 2Box 实例后重新启动。
-2. 只启动一个目标程序，确认它可以使用全部逻辑 CPU。
-3. 启动第二个 Environment，确认两个 Environment 被分成两组 CPU。
-4. 观察子进程是否正常启动。
-5. 再启动第三、第四个 Environment，确认每组 CPU 随活跃 Environment 数量重新均分。
+删除实例 2 后：
+
+`123 / 456 / 78`
+
+剩余实例继续保持原来的 CPU 范围，直到实例退出。
+
+这样可以避免关闭过程中遍历所有环境、所有进程并连续调用 `SetProcessAffinityMask`，降低卡死、高 CPU 和退出阶段调用链冲突的风险。
+
+## 关键优化
+
+旧 v1：
+
+1. 创建实例 -> 重新调整所有实例。
+2. 删除实例 -> 再次重新调整所有实例。
+3. 目标程序内部每次 `CreateProcess` Hook 都调用 `SetProcessAffinityMask`。
+
+优化版：
+
+1. 创建实例 -> 必要时重新调整现有实例。
+2. 删除实例 -> **不调整 CPU**。
+3. 新实例的根进程在 `ResumeThread` 前设置一次 Affinity。
+4. 根进程的子进程自动继承 Affinity，因此 `MemoryDll` 不再对每次 `CreateProcess` 重复设置。
+
+Windows 官方文档说明，进程 Affinity 会被子进程继承，因此这里可以删除子进程 Hook 中重复的 `SetProcessAffinityMask`。
+
+## 注意
+
+当前实现仍以单个 Windows Processor Group、最多 64 个逻辑处理器为目标。普通桌面 CPU（例如 4 核 8 线程、8 核 16 线程）可以直接使用。
+
+超过 64 个逻辑处理器的机器，需要进一步使用 Processor Group / CPU Sets 方案，不能简单用一个 `ULONGLONG` 表示全部 CPU。

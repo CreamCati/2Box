@@ -33,7 +33,8 @@ extern "C" __declspec(dllexport) unsigned long __stdcall initialize(void* lpThre
 	}
 	pe::wipe_header_memory(thisModule);
 
-	biz_initialize(injectParams.envFlag, injectParams.envIndex, injectParams.rootPath, injectParams.rootPathCount);
+	biz_initialize(essentialData.version, injectParams.envFlag, injectParams.envIndex,
+	               0, injectParams.rootPath, injectParams.rootPathCount);
 	return 0;
 }
 #endif
@@ -56,7 +57,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpRese
 		}
 		const DetourInjectParams& injectParams = *static_cast<DetourInjectParams*>(payload);
 
-		biz_initialize(injectParams.version, injectParams.envFlag, injectParams.envIndex, injectParams.rootPath, injectParams.rootPathCount);
+		biz_initialize(injectParams.version, injectParams.envFlag, injectParams.envIndex,
+		               injectParams.cpuAffinityMask, injectParams.rootPath, injectParams.rootPathCount);
 		DetourFreePayload(payload);
 	}
 #endif
