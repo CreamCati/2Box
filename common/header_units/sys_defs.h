@@ -192,8 +192,6 @@ struct DetourInjectParams
 	SystemVersionInfo version;
 	ULONGLONG envFlag;
 	DWORD envIndex;
-	// Fixed-width field because this payload is shared by 32/64-bit MemoryDll.
-	ULONGLONG cpuAffinityMask;
 	DWORD rootPathCount;
 	wchar_t rootPath[];
 };

@@ -58,18 +58,6 @@ namespace hook
 
 	inline PDETOUR_CREATE_PROCESS_ROUTINEW* pCreateProcessTrampolineW{nullptr};
 
-	void apply_cpu_affinity(HANDLE hProcess)
-	{
-		const ULONGLONG mask = global::Data::get().cpuAffinityMask();
-		if (!mask)
-		{
-			return;
-		}
-
-		// CPU affinity is an optimization; a failure must not block the application.
-		SetProcessAffinityMask(hProcess, static_cast<KAFFINITY>(mask));
-	}
-
 	BOOL inject_dll_to_process(LPPROCESS_INFORMATION lpProcessInformation)
 	{
 		std::string_view dllFullPath = global::Data::get().dllFullPath();
@@ -127,7 +115,6 @@ namespace hook
 		const BOOL bRet = inject_dll_to_process(lpProcessInformation);
 		if (bRet)
 		{
-			apply_cpu_affinity(lpProcessInformation->hProcess);
 			if (!bOrigSuspended)
 			{
 				ResumeThread(lpProcessInformation->hThread);
@@ -187,7 +174,6 @@ namespace hook
 		const BOOL bRet = inject_dll_to_process(lpProcessInformation);
 		if (bRet)
 		{
-			apply_cpu_affinity(lpProcessInformation->hProcess);
 			if (!bOrigSuspended)
 			{
 				ResumeThread(lpProcessInformation->hThread);

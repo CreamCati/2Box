@@ -1,39 +1,38 @@
-# 2Box CPU 自动分配修改版
+# 2Box CPU 自动分配 V2
 
-本版本保持原有 2Box/2Box-cli 工作方式不变，新增自动 CPU Affinity 分配。
+## 为什么 V1 会导致卡死/单核 100%
 
-## 分配逻辑
+V1 在 MemoryDll 的 `CreateProcessA/W` Hook 中给每一个被创建的进程调用 `SetProcessAffinityMask`，同时 CPU 分区数量使用全部 Environment 数量。2Box 的 Environment 可以是历史/空环境，因此可能出现“实际只运行一个程序，但 CPU 被限制到一个逻辑核心”的情况。另一个风险是把目标程序创建的辅助子进程也强制限制到同一个 CPU 集合。
 
-假设 Windows 在处理器组 0 中有 N 个逻辑处理器，当前有 M 个 2Box 环境：
+## V2 设计
 
-- M=1：该环境使用全部 N 个逻辑处理器。
-- M=2：平均分成两组，例如 16 线程 -> CPU 0-7 / 8-15。
-- M=3：平均分成三组，例如 16 线程 -> CPU 0-4 / 5-9 / 10-15。
-- M=4：平均分成四组，例如 16 线程 -> CPU 0-3 / 4-7 / 8-11 / 12-15。
-- M>N：多个环境按逻辑处理器轮流共享。
+CPU Affinity 不再通过 MemoryDll 的 CreateProcessW Hook 设置。目标进程完成 2Box RPC login 后，由 2Box 主进程统一给“正在运行的 Environment”均分逻辑 CPU。
 
-当创建或删除环境时，2Box 会重新计算所有环境的 CPU 范围，并立即对已经运行的进程调用 `SetProcessAffinityMask`。
+这样做有三个好处：
 
-新创建的目标进程还会在 `MemoryDll` 的 `CreateProcessW/CreateProcessA` Hook 中，在恢复线程之前设置相同的 CPU Affinity，因此目标程序后续创建的子进程也会继承该限制。
+1. 空的/历史 Environment 不占 CPU 配额。
+2. 不会把目标程序创建的所有子进程强制限制在同一个 CPU 集合；Windows 会让子进程继承父进程的 Affinity。
+3. Affinity 设置发生在目标程序正式 Resume 前的初始化阶段，减少启动过程中改变调度环境导致的兼容性风险。
 
-## 修改位置
+## 分配规则
 
-1. `2Box/biz/env/Env-EnvManager.*`
-   - 根据当前环境数量计算 CPU 分区。
-   - 创建/删除环境时重新平衡已有进程。
-2. `2Box/biz/launcher/Launcher.cpp`
-   - 把计算出的 CPU mask 写入 Detours payload。
-3. `common/header_units/sys_defs.h`
-   - 给 `DetourInjectParams` 增加固定 64 位 CPU mask 字段。
-4. `MemoryDll/global_data/*`
-   - 接收并保存 CPU mask。
-5. `MemoryDll/hook/Hook-Kernel32.ixx`
-   - 目标进程创建成功、注入完成后、ResumeThread 前调用 `SetProcessAffinityMask`。
+只统计 `getAllProcessesCount() > 0` 的 Environment。某个 Environment 第一次登录 2Box 时重新均分所有活跃 Environment。
 
-## 注意
+例如 16 个逻辑 CPU、2 个活跃 Environment：
 
-当前实现针对普通 Windows 桌面环境（逻辑处理器 <= 64，全部位于 processor group 0）设计。
+- Env 1 -> CPU 0-7
+- Env 2 -> CPU 8-15
 
-如果 CPU 超过 64 个逻辑处理器，建议进一步改成 Windows Processor Group / CPU Sets 方案。
+如果当前只有一个活跃 Environment，它会获得全部 CPU，不会出现“单实例被限制到一个核心”的问题。
 
-CPU Affinity 设置失败不会阻止程序启动；这项功能属于性能调度优化，不改变 2Box 原有的多实例隔离逻辑。
+## 当前限制
+
+当前实现仍针对单 Processor Group、最多 64 个逻辑 CPU。超过 64 逻辑 CPU 的机器后续应升级到 Processor Groups / CPU Sets。
+
+## 建议测试
+
+1. 删除/关闭旧的 2Box 实例后重新启动。
+2. 只启动一个目标程序，确认它可以使用全部逻辑 CPU。
+3. 启动第二个 Environment，确认两个 Environment 被分成两组 CPU。
+4. 观察子进程是否正常启动。
+5. 再启动第三、第四个 Environment，确认每组 CPU 随活跃 Environment 数量重新均分。
