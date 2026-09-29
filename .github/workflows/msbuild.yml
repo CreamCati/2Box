@@ -1,0 +1,263 @@
+name: Build 2Box
+
+on:
+  # 推送到 master 时自动编译
+  push:
+    branches:
+      - master
+
+  # 提交 Pull Request 时编译检查
+  pull_request:
+    branches:
+      - master
+
+  # 支持在 GitHub Actions 页面手动运行
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOLUTION_FILE_PATH: 2Box.sln
+  BUILD_CONFIGURATION: Release
+
+jobs:
+  build:
+    name: Build 2Box
+    runs-on: windows-latest
+
+    steps:
+
+      # ========================================
+      # 1. 获取源码
+      # ========================================
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+
+      # ========================================
+      # 2. 安装 / 配置 MSBuild
+      # ========================================
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+
+      # ========================================
+      # 3. 显示编译环境
+      # ========================================
+      - name: Show build environment
+        shell: cmd
+        run: |
+          echo ========================================
+          echo Build Environment
+          echo ========================================
+          msbuild -version
+          echo.
+          echo Windows:
+          ver
+          echo.
+          echo Workspace:
+          echo %GITHUB_WORKSPACE%
+          echo ========================================
+
+
+      # ========================================
+      # 4. 编译 Release x86
+      #
+      # 这里非常重要：
+      # 2Box 的资源需要：
+      #
+      # 2Box/res/embed_dll/x86/MemoryDll32.dll
+      #
+      # 所以必须先生成 32 位 MemoryDll。
+      # ========================================
+      - name: Build Release x86
+        shell: cmd
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo ========================================
+          echo Building Release x86
+          echo ========================================
+
+          msbuild "%SOLUTION_FILE_PATH%" ^
+            /m ^
+            /p:Configuration=%BUILD_CONFIGURATION% ^
+            /p:Platform=x86 ^
+            /verbosity:minimal
+
+          if errorlevel 1 (
+            echo.
+            echo ========================================
+            echo x86 BUILD FAILED
+            echo ========================================
+            exit /b 1
+          )
+
+          echo.
+          echo ========================================
+          echo x86 BUILD SUCCESS
+          echo ========================================
+
+
+      # ========================================
+      # 5. 检查 32 位 MemoryDll
+      # ========================================
+      - name: Verify MemoryDll32
+        shell: cmd
+        run: |
+          echo ========================================
+          echo Checking MemoryDll32.dll
+          echo ========================================
+
+          if not exist "2Box\res\embed_dll\x86\MemoryDll32.dll" (
+            echo ERROR: MemoryDll32.dll not found!
+            exit /b 1
+          )
+
+          echo Found:
+          dir "2Box\res\embed_dll\x86\MemoryDll32.dll"
+
+
+      # ========================================
+      # 6. 编译 Release x64
+      #
+      # 这一步会：
+      #
+      # MemoryDll64.dll
+      # 2Box.exe
+      # 2Box-cli.exe
+      #
+      # 同时资源编译会把：
+      #
+      # MemoryDll32.dll
+      # MemoryDll64.dll
+      #
+      # 嵌入 2Box.exe
+      # ========================================
+      - name: Build Release x64
+        shell: cmd
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo ========================================
+          echo Building Release x64
+          echo ========================================
+
+          msbuild "%SOLUTION_FILE_PATH%" ^
+            /m ^
+            /p:Configuration=%BUILD_CONFIGURATION% ^
+            /p:Platform=x64 ^
+            /verbosity:minimal
+
+          if errorlevel 1 (
+            echo.
+            echo ========================================
+            echo x64 BUILD FAILED
+            echo ========================================
+            exit /b 1
+          )
+
+          echo.
+          echo ========================================
+          echo x64 BUILD SUCCESS
+          echo ========================================
+
+
+      # ========================================
+      # 7. 检查最终文件
+      # ========================================
+      - name: Verify build output
+        shell: cmd
+        run: |
+          echo ========================================
+          echo Checking build output
+          echo ========================================
+
+          echo.
+          echo -------- x64 output --------
+          dir /s "bin\x64\*.exe"
+
+          echo.
+          echo -------- MemoryDll x86 --------
+          dir "2Box\res\embed_dll\x86\MemoryDll32.dll"
+
+          echo.
+          echo -------- MemoryDll x64 --------
+          dir "2Box\res\embed_dll\x64\MemoryDll64.dll"
+
+          echo.
+          echo -------- Checking 2Box.exe --------
+
+          if not exist "bin\x64\2Box.exe" (
+            echo ERROR: 2Box.exe not found!
+            exit /b 1
+          )
+
+          echo 2Box.exe found.
+
+          echo.
+          echo -------- Checking 2Box-cli.exe --------
+
+          if not exist "bin\x64\2Box-cli.exe" (
+            echo ERROR: 2Box-cli.exe not found!
+            exit /b 1
+          )
+
+          echo 2Box-cli.exe found.
+
+          echo.
+          echo ========================================
+          echo BUILD OUTPUT CHECK SUCCESS
+          echo ========================================
+
+
+      # ========================================
+      # 8. 准备发布目录
+      # ========================================
+      - name: Prepare release package
+        shell: powershell
+        run: |
+          $releaseDir = "release"
+
+          if (Test-Path $releaseDir) {
+              Remove-Item $releaseDir -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $releaseDir | Out-Null
+
+          # 复制主程序
+          Copy-Item "bin\x64\2Box.exe" `
+                    "$releaseDir\2Box.exe"
+
+          # 复制 CLI
+          Copy-Item "bin\x64\2Box-cli.exe" `
+                    "$releaseDir\2Box-cli.exe"
+
+          # 如果项目有 README，则复制
+          if (Test-Path "README.md") {
+              Copy-Item "README.md" `
+                        "$releaseDir\README.md"
+          }
+
+          # CPU 自动分配修改说明
+          if (Test-Path "CPU_AFFINITY_MODIFICATION.md") {
+              Copy-Item "CPU_AFFINITY_MODIFICATION.md" `
+                        "$releaseDir\CPU_AFFINITY_MODIFICATION.md"
+          }
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "Release package:"
+          Write-Host "========================================"
+
+          Get-ChildItem $releaseDir
+
+
+      # ========================================
+      # 9. 上传 GitHub Actions Artifact
+      # ========================================
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2Box-CPU-Auto-x64
+          path: release
+          if-no-files-found: error
