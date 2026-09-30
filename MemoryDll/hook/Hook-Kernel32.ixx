@@ -58,7 +58,6 @@ namespace hook
 
 	inline PDETOUR_CREATE_PROCESS_ROUTINEW* pCreateProcessTrampolineW{nullptr};
 
-
 	BOOL inject_dll_to_process(LPPROCESS_INFORMATION lpProcessInformation)
 	{
 		std::string_view dllFullPath = global::Data::get().dllFullPath();

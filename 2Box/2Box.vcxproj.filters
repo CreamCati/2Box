@@ -76,6 +76,9 @@
     <ClInclude Include="biz\rpc\RpcServer.h">
       <Filter>src\biz\rpc</Filter>
     </ClInclude>
+    <ClInclude Include="biz\launcher\CpuAffinity.h">
+      <Filter>src\biz\launcher</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="app\MainApp.ixx">
@@ -157,6 +160,9 @@
       <Filter>src\biz\launcher</Filter>
     </ClCompile>
     <ClCompile Include="biz\launcher\Launcher.cpp">
+      <Filter>src\biz\launcher</Filter>
+    </ClCompile>
+    <ClCompile Include="biz\launcher\CpuAffinity.cpp">
       <Filter>src\biz\launcher</Filter>
     </ClCompile>
     <ClCompile Include="biz\injector\Injector.ixx">

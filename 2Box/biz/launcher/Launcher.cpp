@@ -11,10 +11,18 @@ import EssentialData;
 import Utility.SystemInfo;
 import Biz.Core;
 
+#include "CpuAffinity.h"
+
+#include <atomic>
+
 namespace
 {
-	PROCESS_INFORMATION create_and_inject(const biz::Env* env, ULONGLONG cpuAffinityMask,
-                                      std::wstring_view exePath, std::wstring_view params)
+	// Monotonic instance counter. Each new instance consumes the next usable
+	// physical core in round-robin order. It is deliberately not decremented
+	// when an instance exits: a later launch simply continues the rotation.
+	std::atomic<std::size_t> g_cpuAffinityInstanceIndex{0};
+
+	PROCESS_INFORMATION create_and_inject(const biz::Env* env, std::wstring_view exePath, std::wstring_view params)
 	{
 		PROCESS_INFORMATION procInfo = {nullptr};
 		STARTUPINFOW startupInfo = {sizeof(startupInfo)};
@@ -33,6 +41,16 @@ namespace
 		}
 		try
 		{
+			// Keep the target suspended until all 2Box injection payload data
+			// and the CPU affinity have been prepared. This avoids a window in
+			// which the target could start running on an arbitrary core.
+			const std::size_t instanceIndex = g_cpuAffinityInstanceIndex.fetch_add(1, std::memory_order_relaxed);
+			if (!cpu_affinity::assign_next_core(procInfo.hProcess, procInfo.hThread, instanceIndex))
+			{
+				throw std::runtime_error(std::format(
+					"CPU affinity assignment failed, error code: {}", GetLastError()));
+			}
+
 			const std::wstring_view rootPath = app().exeDir();
 			const std::uint32_t rootPathCount = static_cast<std::uint32_t>(rootPath.length());
 			const std::uint32_t rootPathSize = rootPathCount * sizeof(wchar_t);
@@ -42,7 +60,6 @@ namespace
 			injectParams->version = biz::get_core_data().version;
 			injectParams->envFlag = env->getFlag();
 			injectParams->envIndex = env->getIndex();
-			injectParams->cpuAffinityMask = cpuAffinityMask;
 			injectParams->rootPathCount = rootPathCount;
 			memcpy(injectParams->rootPath, rootPath.data(), rootPathSize);
 			if (!DetourCopyPayloadToProcess(procInfo.hProcess, DETOUR_INJECT_PARAMS_GUID, injectParams, paramsSize))
@@ -106,17 +123,7 @@ namespace biz
 		{
 			env = env_mgr().createEnv();
 		}
-		const ULONGLONG cpuAffinityMask = env_mgr().getCpuAffinityMask(env);
-		const PROCESS_INFORMATION procInfo = create_and_inject(env.get(), cpuAffinityMask, exePath, params);
-
-		// Set affinity exactly once, while the root process is still suspended.
-		// Child processes inherit this affinity automatically, so the MemoryDll
-		// does not need to call SetProcessAffinityMask for every CreateProcess.
-		if (cpuAffinityMask)
-		{
-			SetProcessAffinityMask(procInfo.hProcess, static_cast<KAFFINITY>(cpuAffinityMask));
-		}
-
+		const PROCESS_INFORMATION procInfo = create_and_inject(env.get(), exePath, params);
 		ResumeThread(procInfo.hThread);
 		CloseHandle(procInfo.hThread);
 		CloseHandle(procInfo.hProcess);

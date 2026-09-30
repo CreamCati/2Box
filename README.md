@@ -56,3 +56,25 @@ https://kook.vip/8z8C9U
 ### Windows API 错误代码
 - **`正数`** - Windows API 调用失败时返回的系统错误码
     - 这些是标准的 Windows 错误代码，具体含义请参考 [Microsoft 官方文档](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes)
+
+
+## CPU 自动分配（CPU Affinity V1）
+
+此版本在目标进程启动时自动进行 CPU 亲和性分配：
+
+- 每个 2Box 实例默认只分配一个**物理 CPU 核心**。
+- 实例按启动顺序轮询核心：实例 1 → 核心 0，实例 2 → 核心 1，依次类推。
+- 超过可用核心数后从核心 0 重新循环。
+- 一个物理核心如果包含 SMT/Hyper-Threading 逻辑处理器，会将该核心的全部逻辑处理器绑定给同一个实例，不把线程当作独立核心。
+- 对大小核 CPU，会读取 Windows 的 `EfficiencyClass`，只保留最高性能等级的核心；较低等级的小核不参与分配。
+- 已启动实例不会因为其他实例退出而重新分配 CPU。
+
+例如 8 个 P-Core + 8 个 E-Core 的处理器，默认只使用 8 个 P-Core：
+
+```text
+实例 1 → P-Core 0
+实例 2 → P-Core 1
+...
+实例 8 → P-Core 7
+实例 9 → P-Core 0
+```
