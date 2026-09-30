@@ -1,3 +1,7 @@
+module;
+#include "CpuAffinity.h"
+#include <atomic>
+
 module Launcher;
 
 import "sys_defs.h";
@@ -11,9 +15,6 @@ import EssentialData;
 import Utility.SystemInfo;
 import Biz.Core;
 
-#include "CpuAffinity.h"
-
-#include <atomic>
 
 namespace
 {

@@ -1,5 +1,8 @@
 #include "CpuAffinity.h"
 
+#define NOMINMAX
+#include <Windows.h>
+
 #include <algorithm>
 #include <format>
 #include <stdexcept>
@@ -9,26 +12,42 @@ namespace cpu_affinity
 {
     namespace
     {
+        // One physical core.  A physical core may contain multiple CPU Sets
+        // (for example two SMT/Hyper-Threading logical processors).
+        struct PhysicalCore
+        {
+            WORD group{};
+            BYTE coreIndex{};
+            BYTE efficiencyClass{};
+            std::vector<ULONG> cpuSetIds;
+        };
+
         std::vector<PhysicalCore> query_physical_cores()
         {
             DWORD length = 0;
-            if (GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &length) ||
-                GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+
+            // GetSystemCpuSetInformation is available on Windows 10+.
+            // The first call obtains the required buffer size.
+            GetSystemCpuSetInformation(nullptr, 0, &length, nullptr, 0);
+            const DWORD firstError = GetLastError();
+            if (length == 0 && firstError != ERROR_INSUFFICIENT_BUFFER)
             {
                 throw std::runtime_error(std::format(
-                    "GetLogicalProcessorInformationEx(size) failed, error code: {}", GetLastError()));
+                    "GetSystemCpuSetInformation(size) failed, error code: {}",
+                    firstError));
             }
 
             std::vector<std::byte> buffer(length);
-            auto* current = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data());
-
-            if (!GetLogicalProcessorInformationEx(
-                    RelationProcessorCore,
-                    current,
-                    &length))
+            if (!GetSystemCpuSetInformation(
+                    reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()),
+                    length,
+                    &length,
+                    nullptr,
+                    0))
             {
                 throw std::runtime_error(std::format(
-                    "GetLogicalProcessorInformationEx(data) failed, error code: {}", GetLastError()));
+                    "GetSystemCpuSetInformation(data) failed, error code: {}",
+                    GetLastError()));
             }
 
             std::vector<PhysicalCore> cores;
@@ -36,31 +55,43 @@ namespace cpu_affinity
 
             while (offset < length)
             {
-                current = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data() + offset);
+                auto* info = reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(
+                    buffer.data() + offset);
 
-                if (current->Relationship == RelationProcessorCore)
+                if (info->Type == CpuSetInformation)
                 {
-                    const PROCESSOR_RELATIONSHIP& relationship = current->Processor;
+                    const auto& cpuSet = info->CpuSet;
 
-                    // RelationProcessorCore always has GroupCount == 1.
-                    // Keep the defensive check because this code should never
-                    // rely on malformed topology data.
-                    if (relationship.GroupCount == 1)
-                    {
-                        const GROUP_AFFINITY& group = relationship.GroupMask[0];
-
-                        cores.push_back(PhysicalCore{
-                            group.Group,
-                            group.Mask,
-                            relationship.EfficiencyClass
+                    // CoreIndex is identical for CPU Sets belonging to the
+                    // same physical core, including SMT siblings.
+                    auto it = std::find_if(
+                        cores.begin(),
+                        cores.end(),
+                        [&cpuSet](const PhysicalCore& core)
+                        {
+                            return core.group == cpuSet.Group &&
+                                   core.coreIndex == cpuSet.CoreIndex;
                         });
+
+                    if (it == cores.end())
+                    {
+                        PhysicalCore core;
+                        core.group = cpuSet.Group;
+                        core.coreIndex = cpuSet.CoreIndex;
+                        core.efficiencyClass = cpuSet.EfficiencyClass;
+                        core.cpuSetIds.push_back(cpuSet.Id);
+                        cores.push_back(std::move(core));
+                    }
+                    else
+                    {
+                        it->cpuSetIds.push_back(cpuSet.Id);
                     }
                 }
 
-                if (current->Size == 0)
+                if (info->Size == 0)
                     break;
 
-                offset += current->Size;
+                offset += info->Size;
             }
 
             if (cores.empty())
@@ -73,26 +104,19 @@ namespace cpu_affinity
 
         std::vector<PhysicalCore> select_usable_cores(std::vector<PhysicalCore> cores)
         {
-            // EfficiencyClass is zero on homogeneous systems.
-            // It is non-zero on heterogeneous systems and a higher value
-            // represents the higher-performance / lower-efficiency core class.
-            // Therefore, when heterogeneous cores are present, keep only the
-            // highest class (P-cores on Intel hybrid desktop CPUs).
+            // Microsoft defines a higher EfficiencyClass as intrinsically
+            // higher performance and lower power efficiency.  On Intel P/E
+            // systems this lets us keep P-cores and exclude E-cores.
             BYTE maxEfficiencyClass = 0;
             bool heterogeneous = false;
 
             for (const PhysicalCore& core : cores)
             {
-                maxEfficiencyClass = std::max(maxEfficiencyClass, core.efficiencyClass);
-            }
-
-            for (const PhysicalCore& core : cores)
-            {
                 if (core.efficiencyClass != 0)
-                {
                     heterogeneous = true;
-                    break;
-                }
+
+                if (core.efficiencyClass > maxEfficiencyClass)
+                    maxEfficiencyClass = core.efficiencyClass;
             }
 
             if (heterogeneous)
@@ -108,8 +132,7 @@ namespace cpu_affinity
                     cores.end());
             }
 
-            // Make the allocation deterministic by group/mask instead of
-            // relying on undocumented enumeration order.
+            // Make allocation deterministic.
             std::sort(
                 cores.begin(),
                 cores.end(),
@@ -117,57 +140,65 @@ namespace cpu_affinity
                 {
                     if (a.group != b.group)
                         return a.group < b.group;
-                    return a.mask < b.mask;
+                    return a.coreIndex < b.coreIndex;
                 });
 
             return cores;
         }
     }
 
-    std::vector<PhysicalCore> get_usable_physical_cores()
+    bool assign_next_core(
+        void* processHandle,
+        void* primaryThread,
+        std::size_t instanceIndex)
     {
-        return select_usable_cores(query_physical_cores());
-    }
-
-    bool assign_next_core(HANDLE processHandle, HANDLE primaryThread, std::size_t instanceIndex)
-    {
-        if (!processHandle || !primaryThread)
+        if (processHandle == nullptr || primaryThread == nullptr)
+        {
+            SetLastError(ERROR_INVALID_HANDLE);
             return false;
+        }
 
-        const std::vector<PhysicalCore> cores = get_usable_physical_cores();
+        const std::vector<PhysicalCore> cores =
+            select_usable_cores(query_physical_cores());
+
         if (cores.empty())
+        {
+            SetLastError(ERROR_NOT_FOUND);
             return false;
+        }
 
         const PhysicalCore& core = cores[instanceIndex % cores.size()];
+        HANDLE process = static_cast<HANDLE>(processHandle);
+        HANDLE thread = static_cast<HANDLE>(primaryThread);
 
-        // The target process is created suspended and therefore has only its
-        // primary thread running. Setting the primary thread's group affinity
-        // before ResumeThread makes it start on exactly this physical core.
-        // The mask contains all logical processors of that physical core, so
-        // SMT/HT siblings belong to the same instance instead of becoming
-        // separate "cores".
-        GROUP_AFFINITY groupAffinity{};
-        groupAffinity.Mask = core.mask;
-        groupAffinity.Group = core.group;
-
-        if (!SetThreadGroupAffinity(primaryThread, &groupAffinity, nullptr))
+        // CPU Sets are used instead of SetProcessAffinityMask here.  This is
+        // important because the 2Box executable is built as x86 in the CI;
+        // DWORD_PTR is only 32 bits there and cannot represent a core whose
+        // logical processor index is >= 32.  CPU Set IDs are ULONGs and work
+        // correctly from an x86 controller process as well.
+        //
+        // SetProcessDefaultCpuSets makes newly created threads inherit the
+        // selected physical core's CPU Sets, so the whole target process stays
+        // on this physical core rather than only its primary thread.
+        if (!SetProcessDefaultCpuSets(
+                process,
+                core.cpuSetIds.data(),
+                static_cast<ULONG>(core.cpuSetIds.size())))
         {
             return false;
         }
 
-        // On systems with <= 64 logical processors, the normal process-level
-        // affinity API is also safe and makes the intended process affinity
-        // explicit. For larger systems SetThreadGroupAffinity above is the
-        // group-aware path.
-        if (GetActiveProcessorGroupCount() == 1)
+        // Explicitly select the same CPU Sets for the already-created primary
+        // thread.  This removes any scheduling window before ResumeThread().
+        if (!SetThreadSelectedCpuSets(
+                thread,
+                core.cpuSetIds.data(),
+                static_cast<ULONG>(core.cpuSetIds.size())))
         {
-            if (!SetProcessAffinityMask(processHandle, static_cast<DWORD_PTR>(core.mask)))
-            {
-                // The thread affinity has already been applied. Do not fail
-                // the launch solely because the redundant process-level call
-                // was rejected by an unusual security/topology configuration.
-                return true;
-            }
+            // Clear the process default if the primary-thread operation
+            // failed, then report failure to the launcher.
+            SetProcessDefaultCpuSets(process, nullptr, 0);
+            return false;
         }
 
         return true;

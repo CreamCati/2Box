@@ -1,36 +1,19 @@
 #pragma once
 
-#include <Windows.h>
-
 #include <cstddef>
-#include <cstdint>
-#include <vector>
 
 namespace cpu_affinity
 {
-    // One entry represents one physical CPU core.
-    // Mask contains all logical processors belonging to that core (e.g. both
-    // SMT/Hyper-Threading siblings), so an instance is assigned a core rather
-    // than a single hardware thread.
-    struct PhysicalCore
-    {
-        WORD group{};
-        KAFFINITY mask{};
-        BYTE efficiencyClass{};
-    };
-
-    // Returns the usable physical cores for instance affinity.
+    // Assign one usable physical CPU core to a newly created, suspended
+    // process.  The first instance gets the first usable core, the next
+    // instance gets the next core, and so on; after the last core it wraps.
     //
-    // On a normal homogeneous CPU all physical cores are returned.
-    // On a heterogeneous CPU (Intel P/E-core style), only cores with the
-    // highest EfficiencyClass are returned; the lower-efficiency cores are
-    // intentionally excluded.
-    std::vector<PhysicalCore> get_usable_physical_cores();
-
-    // Assigns one physical core to a newly created, still-suspended process.
-    // The core is selected by round-robin order and the next instance moves
-    // to the next usable physical core.
-    //
-    // Returns true on success. The instanceIndex is zero-based.
-    bool assign_next_core(HANDLE processHandle, HANDLE primaryThread, std::size_t instanceIndex);
+    // The public header intentionally does not include Windows.h or STL
+    // containers.  Launcher.cpp is a C++ module implementation unit, and
+    // pulling Windows/STL headers into the module purview can cause MSVC STL
+    // declarations to be parsed twice.
+    bool assign_next_core(
+        void* processHandle,
+        void* primaryThread,
+        std::size_t instanceIndex);
 }
