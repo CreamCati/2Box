@@ -31,7 +31,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="biz\rpc\RpcServer.h" />
-    <ClInclude Include="biz\launcher\CpuAffinity.h" />
     <ClInclude Include="res\resource.h" />
   </ItemGroup>
   <ItemGroup>
@@ -61,7 +60,6 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="biz\launcher\Launcher.cpp" />
-    <ClCompile Include="biz\launcher\CpuAffinity.cpp" />
     <ClCompile Include="biz\launcher\Launcher.ixx" />
     <ClCompile Include="biz\rpc\RpcServer.cpp" />
     <ClCompile Include="biz\symbols\SymbolLoader.ixx">
