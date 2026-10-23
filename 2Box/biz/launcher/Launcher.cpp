@@ -1,3 +1,13 @@
+module;
+#include <Windows.h>
+#include <TlHelp32.h>
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cwchar>
+#include <thread>
+#include <vector>
+
 module Launcher;
 
 import "sys_defs.h";
@@ -13,6 +23,130 @@ import Biz.Core;
 
 namespace
 {
+	// Cache the logical-processor masks belonging to each physical core.
+	// On the Ryzen 7 7700, each entry normally contains the two SMT siblings
+	// of one physical core. Keeping both siblings in the mask still confines
+	// the game's threads to that one physical core.
+	const std::vector<DWORD_PTR>& get_physical_core_masks()
+	{
+		static const std::vector<DWORD_PTR> masks = []
+		{
+			std::vector<DWORD_PTR> result;
+			DWORD bytes = 0;
+			GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
+			if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytes == 0)
+			{
+				return result;
+			}
+
+			std::vector<std::byte> buffer(bytes);
+			if (!GetLogicalProcessorInformationEx(
+				RelationProcessorCore,
+				reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()),
+				&bytes))
+			{
+				return result;
+			}
+
+			const auto* current = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+			const auto* end = buffer.data() + bytes;
+			while (reinterpret_cast<const std::byte*>(current) < end && current->Size >= sizeof(ULONG) * 2)
+			{
+				if (current->Relationship == RelationProcessorCore && current->Processor.GroupCount > 0)
+				{
+					// Ryzen 7 7700 has one processor group. Use the first group mask;
+					// do not treat the two SMT siblings as separate physical cores.
+					const DWORD_PTR mask = static_cast<DWORD_PTR>(current->Processor.GroupMask[0].Mask);
+					if (mask != 0)
+					{
+						result.push_back(mask);
+					}
+				}
+				if (current->Size == 0)
+				{
+					break;
+				}
+				current = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(
+					reinterpret_cast<const std::byte*>(current) + current->Size);
+			}
+			return result;
+		}();
+		return masks;
+	}
+
+	// Find the actual target executable started by this 2Box cmd.exe process.
+	// The existing Detours injection/start chain is preserved; this only observes
+	// the child process and applies affinity after the game process exists.
+	HANDLE find_target_child_process(DWORD parentPid, std::wstring_view targetPath)
+	{
+		const std::wstring expectedPath{std::filesystem::path{targetPath}.native()};
+		for (int attempt = 0; attempt < 40; ++attempt)
+		{
+			HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+			if (snapshot != INVALID_HANDLE_VALUE)
+			{
+				PROCESSENTRY32W entry{sizeof(entry)};
+				if (Process32FirstW(snapshot, &entry))
+				{
+					do
+					{
+						if (entry.th32ParentProcessID != parentPid)
+						{
+							continue;
+						}
+
+						HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, FALSE, entry.th32ProcessID);
+						if (!process)
+						{
+							continue;
+						}
+
+						std::vector<wchar_t> imagePath(32768);
+						DWORD imagePathLength = static_cast<DWORD>(imagePath.size());
+						const bool gotPath = QueryFullProcessImageNameW(process, 0, imagePath.data(), &imagePathLength) != FALSE;
+						const bool matches = gotPath && CompareStringOrdinal(
+							expectedPath.c_str(), static_cast<int>(expectedPath.size()),
+							imagePath.data(), static_cast<int>(imagePathLength), TRUE) == CSTR_EQUAL;
+						if (matches)
+						{
+							CloseHandle(snapshot);
+							return process;
+						}
+						CloseHandle(process);
+					} while (Process32NextW(snapshot, &entry));
+				}
+				CloseHandle(snapshot);
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+		return nullptr;
+	}
+
+	void apply_affinity_to_target_process(DWORD launcherPid, std::wstring_view exePath)
+	{
+		const auto& masks = get_physical_core_masks();
+		if (masks.empty())
+		{
+			OutputDebugStringW(L"2Box: CPU topology unavailable; leaving game affinity unchanged.\n");
+			return;
+		}
+
+		HANDLE gameProcess = find_target_child_process(launcherPid, exePath);
+		if (!gameProcess)
+		{
+			OutputDebugStringW(L"2Box: target game process was not found; leaving affinity unchanged.\n");
+			return;
+		}
+
+		static std::atomic_size_t nextCore{0};
+		const size_t coreIndex = nextCore.fetch_add(1, std::memory_order_relaxed) % masks.size();
+		if (!SetProcessAffinityMask(gameProcess, masks[coreIndex]))
+		{
+			OutputDebugStringW(L"2Box: SetProcessAffinityMask failed; game started without an affinity change.\n");
+		}
+		CloseHandle(gameProcess);
+	}
+
 	PROCESS_INFORMATION create_and_inject(const biz::Env* env, std::wstring_view exePath, std::wstring_view params)
 	{
 		PROCESS_INFORMATION procInfo = {nullptr};
@@ -105,8 +239,21 @@ namespace biz
 			env = env_mgr().createEnv();
 		}
 		const PROCESS_INFORMATION procInfo = create_and_inject(env.get(), exePath, params);
+		const DWORD launcherPid = procInfo.dwProcessId;
 		ResumeThread(procInfo.hThread);
 		CloseHandle(procInfo.hThread);
+		// Keep the original sandbox/injection launch chain intact. Once cmd.exe
+		// starts the requested executable, set affinity on that game process itself.
+		try
+		{
+			apply_affinity_to_target_process(launcherPid, exePath);
+		}
+		catch (...)
+		{
+			// Affinity is an optional optimization; never turn its failure into
+			// a failed game launch after the original process has already resumed.
+			OutputDebugStringW(L"2Box: unexpected CPU-affinity error; game launch continues.\n");
+		}
 		CloseHandle(procInfo.hProcess);
 		co_return;
 	}
